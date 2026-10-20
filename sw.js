@@ -1,48 +1,109 @@
-// sw.js - Archivo del Service Worker
+const CACHE_NAME = 'devconnect-v4';
+const BASE_URL = self.registration.scope;
 
-// Nombre y versión de la caché
-const CACHE_NAME = 'devconnect-v1';
-
-// Lista de recursos estáticos obligatorios
 const STATIC_ASSETS = [
-   "/",
-    "/index.html",
-    "/css/styles.css",
-    "/js/app.js",
-    "/manifest.json"
+    BASE_URL,
+    new URL('index.html', BASE_URL).href
 ];
 
-// FASE 1: Instalación
-// Se dispara cuando el archivo se descarga por primera vez o hay cambios en él.
+const OPTIONAL_ASSETS = [
+    new URL('css/styles.css', BASE_URL).href, // Corregido de style.css a styles.css
+    new URL('js/app.js', BASE_URL).href,
+    new URL('manifest.json', BASE_URL).href,
+    new URL('images/icon-192x192.png', BASE_URL).href,
+    new URL('images/icon-512x512.png', BASE_URL).href
+];
+
 self.addEventListener('install', event => {
-    console.log('SW: 1. Instalado correctamente.');
-    
-    // Guardamos los archivos estáticos en caché
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then(cache => {
-                console.log('SW: Guardando archivos en caché...');
-                return cache.addAll(STATIC_ASSETS);
+            .then(async cache => {
+                for (const url of STATIC_ASSETS) {
+                    const response = await fetch(url);
+
+                    if (response.ok) {
+                        await cache.put(url, response);
+                    }
+                }
+
+                await Promise.allSettled(
+                    OPTIONAL_ASSETS.map(async url => {
+                        const response = await fetch(url);
+
+                        if (response.ok) {
+                            await cache.put(url, response);
+                        }
+                    })
+                );
+
+                await self.skipWaiting();
             })
-            .then(() => self.skipWaiting())
     );
 });
 
-// FASE 2: Activación
-// Se dispara cuando el SW toma el control de la aplicación.
 self.addEventListener('activate', event => {
-    console.log('SW: 2. Activado y listo para controlar la app.');
-    event.waitUntil(self.clients.claim());
+    event.waitUntil(
+        caches.keys()
+            .then(names =>
+                Promise.all(
+                    names
+                        .filter(name => name !== CACHE_NAME)
+                        .map(name => caches.delete(name))
+                )
+            )
+            .then(() => self.clients.claim())
+    );
 });
 
-// FASE 3: Intercepción de Peticiones (Fetch)
-// Se dispara cada vez que la página HTML pide un recurso (CSS, JS, imágenes, etc.)
 self.addEventListener('fetch', event => {
-    console.log('SW: 3. Interceptando petición hacia ->', event.request.url);
-    
-    // Responde desde caché si existe, o va a la red
+    const request = event.request;
+    const url = new URL(request.url);
+
+    if (
+        request.method !== 'GET' ||
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.origin !== self.location.origin
+    ) {
+        return;
+    }
+
     event.respondWith(
-        caches.match(event.request)
-            .then(response => response || fetch(event.request))
+        caches.match(request)
+            .then(cached => {
+                if (cached) {
+                    return cached;
+                }
+
+                return fetch(request).then(response => {
+                    if (response.ok) {
+                        const copy = response.clone();
+
+                        event.waitUntil(
+                            caches.open(CACHE_NAME)
+                                .then(cache => cache.put(request, copy))
+                        );
+                    }
+
+                    return response;
+                });
+            })
+            .catch(async () => {
+                if (request.mode === 'navigate') {
+                    const cachedPage = await caches.match(
+                        new URL('index.html', BASE_URL).href
+                    );
+
+                    if (cachedPage) {
+                        return cachedPage;
+                    }
+                }
+
+                return new Response('Recurso no disponible sin conexión', {
+                    status: 503,
+                    headers: {
+                        'Content-Type': 'text/plain; charset=utf-8'
+                    }
+                });
+            })
     );
 });
